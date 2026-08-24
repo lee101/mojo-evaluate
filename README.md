@@ -91,18 +91,18 @@ removed private scikit-learn interface with the current environment.
 ## Benchmarks
 
 Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz, 72
-logical CPUs, Linux 6.8.0-136-generic, on 2026-07-30:
+logical CPUs, Linux 6.8.0-136-generic, on 2026-08-24:
 
 | case | mojo-evaluate | evaluate 0.4.6 | result |
 | --- | ---: | ---: | ---: |
-| accuracy (1M binary) | 4.24 ms | 3961.98 ms | 935.0x faster |
-| f1 (1M binary) | 14.45 ms | 5189.08 ms | 359.1x faster |
-| confusion_matrix (1M, 32 classes) | 18.05 ms | 4628.50 ms | 256.5x faster |
-| f1 macro (1M, 32 classes) | 12.00 ms | 4663.02 ms | 388.5x faster |
-| MCC (1M, 32 classes) | 17.32 ms | 5121.20 ms | 295.6x faster |
-| mse (1M) | 8.02 ms | 3406.24 ms | 424.9x faster |
-| mae (1M) | 8.83 ms | 4347.62 ms | 492.6x faster |
-| mse (250k x 8 outputs) | 8.51 ms | 8229.81 ms | 967.3x faster |
+| accuracy (1M binary) | 2.74 ms | 2976.69 ms | 1084.5x faster |
+| f1 (1M binary) | 8.70 ms | 3587.88 ms | 412.6x faster |
+| confusion_matrix (1M, 32 classes) | 8.27 ms | 2841.66 ms | 343.7x faster |
+| f1 macro (1M, 32 classes) | 7.65 ms | 3554.52 ms | 464.7x faster |
+| MCC (1M, 32 classes) | 8.48 ms | 3412.49 ms | 402.4x faster |
+| mse (1M) | 4.38 ms | 2947.32 ms | 672.4x faster |
+| mae (1M) | 4.51 ms | 2951.45 ms | 653.7x faster |
+| mse (250k x 8 outputs) | 7.16 ms | 6141.79 ms | 857.9x faster |
 
 These are end-to-end calls to each package's public
 `load(...).compute(...)` API on the same in-memory NumPy arrays. They do not
