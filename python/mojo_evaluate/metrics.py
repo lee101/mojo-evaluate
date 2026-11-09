@@ -71,7 +71,22 @@ def _weights(sample_weight, rows: int) -> np.ndarray | None:
         raise ValueError(
             f"sample_weight has {weights.size} values, expected {rows}"
         )
+    if not np.all(np.isfinite(weights)):
+        # Matches sklearn _check_sample_weight / check_array(ensure_all_finite).
+        raise ValueError("Input sample_weight contains NaN or infinity")
+    if np.all(weights == 0):
+        # Matches sklearn _check_sample_weight(all-zero rejection).
+        raise ValueError(
+            "Sample weights must contain at least one non-zero number"
+        )
     return weights
+
+
+def _check_finite(values: np.ndarray, name: str) -> None:
+    # Matches sklearn check_array(ensure_all_finite=True) used by every
+    # upstream _compute path for regression targets and sample weights.
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"Input contains NaN or infinity in {name}")
 
 
 def _classification_inputs(predictions, references, multilabel: bool):
@@ -112,6 +127,8 @@ def _regression_inputs(predictions, references):
         raise ValueError("regression inputs must be one- or two-dimensional")
     if predictions.shape[0] == 0:
         raise ValueError("predictions and references must not be empty")
+    _check_finite(predictions, "predictions")
+    _check_finite(references, "references")
     return (
         predictions,
         references,
@@ -123,6 +140,8 @@ def _aggregate(values: np.ndarray, multioutput):
         if multioutput == "raw_values":
             return values
         if multioutput != "uniform_average":
+            # sklearn _check_reg_targets_with_floating_dtype rejects unknown
+            # strings (InvalidParameterError is a ValueError subclass).
             raise ValueError(
                 "multioutput must be 'raw_values', 'uniform_average', "
                 "or output weights"
@@ -130,10 +149,21 @@ def _aggregate(values: np.ndarray, multioutput):
         result = np.average(values)
     else:
         output_weights = np.asarray(multioutput, dtype=np.float64)
+        if isinstance(multioutput, str) or output_weights.ndim == 0:
+            raise ValueError(
+                "The 'multioutput' parameter must be 'raw_values', "
+                "'uniform_average' or array-like"
+            )
         if output_weights.shape != values.shape:
             raise ValueError(
                 f"multioutput has shape {output_weights.shape}, "
                 f"expected {values.shape}"
+            )
+        if values.size == 1 and output_weights.size == 1:
+            # Matches sklearn _check_reg_targets: custom weights are only
+            # meaningful for multi-output targets.
+            raise ValueError(
+                "Custom weights are useful only in multi-output cases."
             )
         result = np.average(values, weights=output_weights)
     return float(result)
@@ -155,7 +185,9 @@ def _regression_reductions(predictions, references, sample_weight):
     )
     denominator = weights.sum() if weights is not None else float(rows)
     if denominator == 0:
-        raise ZeroDivisionError("Weights sum to zero, can't be normalized")
+        # Matches sklearn _check_sample_weight canonical error class (ValueError);
+        # weights are already validated in _weights, kept as a guard.
+        raise ValueError("Sample weights must contain at least one non-zero number")
     return reductions, denominator
 
 
@@ -168,8 +200,9 @@ def _label_universe(predictions, references, labels=None, pos_label=None):
     if selected is not None:
         if selected.size == 0:
             raise ValueError("labels must contain at least one label")
-        if np.unique(selected).size != selected.size:
-            raise ValueError("labels must not contain duplicates")
+        # Duplicate labels are allowed to match sklearn
+        # precision_score/confusion_matrix, which emit one entry per label.
+        pass
     pieces = [references, predictions]
     if selected is not None:
         pieces.append(selected)
@@ -343,6 +376,18 @@ def compute_classification(
     zero_division="warn",
 ):
     multilabel = config_name == "multilabel"
+    # Matches each upstream _compute signature: f1 has no zero_division
+    # parameter, so accepting it silently was a parity gap.
+    if metric == "f1" and zero_division != "warn":
+        raise TypeError(
+            "F1._compute() got an unexpected keyword argument 'zero_division'"
+        )
+    if metric == "accuracy" and not isinstance(normalize, (bool, np.bool_)):
+        # Matches sklearn accuracy_score validate_params for normalize.
+        raise ValueError(
+            "The 'normalize' parameter of accuracy_score must be an "
+            "instance of 'bool' or an instance of 'numpy.bool'"
+        )
     predictions, references = _classification_inputs(
         predictions, references, multilabel
     )
@@ -350,6 +395,11 @@ def compute_classification(
     weights = _weights(sample_weight, rows)
 
     if metric == "accuracy":
+        # Matches upstream Accuracy._compute: labels is not accepted.
+        if labels is not None:
+            raise TypeError(
+                "Accuracy._compute() got an unexpected keyword argument 'labels'"
+            )
         if multilabel:
             correct = lib().me_subset_accuracy(
                 addr(references),
@@ -371,7 +421,9 @@ def compute_classification(
             return {"accuracy": float(correct) if weights is not None else int(correct)}
         denominator = weights.sum() if weights is not None else rows
         if denominator == 0:
-            raise ValueError("sample_weight must have a non-zero sum")
+            raise ValueError(
+                "Sample weights must contain at least one non-zero number"
+            )
         return {"accuracy": float(correct / denominator)}
 
     if metric == "confusion_matrix":
@@ -433,11 +485,12 @@ def compute_classification(
         true_sum = matrix.sum(axis=1)
         pred_sum = matrix.sum(axis=0)
         numerator = np.trace(matrix) * total - np.dot(true_sum, pred_sum)
-        denominator = math.sqrt(
-            max(0.0, total * total - np.dot(pred_sum, pred_sum))
-            * max(0.0, total * total - np.dot(true_sum, true_sum))
-        )
-        result = numerator / denominator if denominator else 0.0
+        # Matches sklearn matthews_corrcoef: no clamping of the marginal
+        # variances; the product test decides the zero-denominator case.
+        cov_pred = total * total - np.dot(pred_sum, pred_sum)
+        cov_true = total * total - np.dot(true_sum, true_sum)
+        product = cov_pred * cov_true
+        result = numerator / math.sqrt(product) if product else 0.0
         return {"matthews_correlation": float(result)}
 
     if multilabel:
@@ -452,7 +505,23 @@ def compute_classification(
         if np.any((selected < 0) | (selected >= references.shape[1])):
             raise ValueError("labels contains an invalid column index")
         tp, fp, fn, _ = stats[selected].T
+        if selected.size == 0:
+            # Matches upstream: empty labels are not usable; keep ValueError
+            # rather than an IndexError from stats indexing.
+            raise ValueError("labels must contain at least one label")
+        if average == "binary":
+            # Matches sklearn precision/recall/f1_score multilabel check.
+            raise ValueError(
+                "Target is multilabel-indicator but average='binary'. "
+                "Please choose another average setting, one of "
+                "[None, 'micro', 'macro', 'weighted', 'samples']"
+            )
         sample_scores = None
+        if average == "samples" and references.shape[1] <= 1:
+            # Matches sklearn: samplewise metrics need a true indicator matrix.
+            raise ValueError(
+                "Samplewise metrics are not available outside of multilabel classification."
+            )
         if average == "samples":
             selected_references = np.ascontiguousarray(
                 references[:, selected], dtype=np.int64
@@ -543,16 +612,21 @@ def compute_regression(
         values = reductions[:, 4] / denominator
         return {"smape": _aggregate(values, multioutput)}
     if training is None:
-        raise TypeError("mase.compute() missing required keyword argument: 'training'")
+        raise TypeError("Mase._compute() missing 1 required positional argument: 'training'")
     predictions, references = _regression_inputs(predictions, references)
     training = _as_float64(training, "training")
+    _check_finite(training, "training")
     if training.ndim == 1:
         training = training[:, None]
     if training.ndim != 2 or training.shape[1] != references.shape[1]:
         raise ValueError(
             "training must have the same number of outputs as references"
         )
-    if not isinstance(periodicity, (int, np.integer)) or periodicity < 1:
+    if not isinstance(periodicity, (int, np.integer)) or isinstance(
+        periodicity, bool
+    ):
+        raise TypeError("slice indices must be integers")
+    if periodicity < 1:
         raise ValueError("periodicity must be a positive integer")
     if periodicity >= training.shape[0]:
         raise ValueError("periodicity must be smaller than the training length")
@@ -587,8 +661,30 @@ def compute_brier(
     references = np.asarray(references).reshape(-1)
     if predictions.shape != references.shape:
         raise ValueError("predictions and references have different lengths")
+    if predictions.size == 0:
+        raise ValueError("predictions and references must not be empty")
+    _check_finite(predictions, "predictions")
     if np.any((predictions < 0.0) | (predictions > 1.0)):
         raise ValueError("predictions must be probabilities in [0, 1]")
+    # Matches sklearn brier_score_loss: binary probabilistic validation.
+    try:
+        from sklearn.utils.multiclass import type_of_target
+
+        if type_of_target(references) not in {"binary", "multiclass"}:
+            raise ValueError(
+                "The type of the target inferred from y_true is multiclass "
+                "but should be binary according to the shape of y_prob."
+            )
+        unique_references = np.unique(references)
+        if unique_references.size > 2:
+            raise ValueError(
+                "The type of the target inferred from y_true is multiclass "
+                "but should be binary according to the shape of y_prob."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        pass
     binary_references = np.ascontiguousarray(
         references == pos_label, dtype=np.float64
     )

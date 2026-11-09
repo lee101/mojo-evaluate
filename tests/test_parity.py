@@ -393,7 +393,9 @@ def test_regression_rejects_complex_values():
 
 
 def test_zero_sum_weights_are_rejected():
-    with pytest.raises(ValueError, match="non-zero sum"):
+    # Upstream sklearn _check_sample_weight raises
+    # ValueError("Sample weights must contain at least one non-zero number").
+    with pytest.raises(ValueError, match="non-zero"):
         mojo_evaluate.load("accuracy").compute(
             predictions=[0, 1],
             references=[0, 1],

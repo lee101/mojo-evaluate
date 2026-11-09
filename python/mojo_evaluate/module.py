@@ -82,6 +82,12 @@ class Metric:
                 **kwargs,
             )
         if self.name in _REGRESSION:
+            # Matches upstream signatures: only mse accepts squared.
+            if self.name != "mse" and "squared" in kwargs:
+                raise TypeError(
+                    f"{type(self).__name__}._compute() got an unexpected "
+                    "keyword argument 'squared'"
+                )
             return compute_regression(
                 self.name, predictions, references, **kwargs
             )
